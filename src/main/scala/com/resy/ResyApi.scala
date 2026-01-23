@@ -76,6 +76,17 @@ class ResyApi(resyToken: ResyKeys) {
 object ResyApi extends Logging {
   implicit private val system: ActorSystem = ActorSystem()
   private val ws                           = AhcWSClient()
+  @volatile private var isShutdown          = false
+
+  def shutdown(): Future[Unit] = synchronized {
+    if (isShutdown) Future.successful(())
+    else {
+      isShutdown = true
+      try ws.close()
+      catch { case _: Throwable => () }
+      system.terminate().map(_ => ())(system.dispatcher)
+    }
+  }
 
   private def sendGetRequest(
     resyKeys: ResyKeys,

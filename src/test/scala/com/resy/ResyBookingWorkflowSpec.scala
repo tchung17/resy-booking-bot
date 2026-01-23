@@ -85,7 +85,7 @@ class ResyBookingWorkflowSpec extends AnyFlatSpec with Matchers {
 
     val resyBookingWorkflow = new ResyBookingWorkflow(resyClient, resDetails)
 
-    resyBookingWorkflow.run(0) match {
+    resyBookingWorkflow.run(millisToRetry = 0) match {
       case Failure(exception) =>
         exception match {
           case _: RuntimeException =>

@@ -10,11 +10,11 @@ import scala.util.{Failure, Success, Try}
 
 class ResyBookingWorkflow(resyClient: ResyClient, resDetails: ReservationDetails) extends Logging {
 
-  def run(millisToRetry: Long = (10 seconds).toMillis): Try[String] =
-    runnable(millisToRetry, DateTime.now.getMillis)
+  def run(doBook: Boolean = true, millisToRetry: Long = (10 seconds).toMillis): Try[String] =
+    runnable(doBook, millisToRetry, DateTime.now.getMillis)
 
   @tailrec
-  private[this] def runnable(millisToRetry: Long, dateTimeStart: Long): Try[String] = {
+  private[this] def runnable(doBook: Boolean, millisToRetry: Long, dateTimeStart: Long): Try[String] = {
     logger.info("Taking the shot...")
     logger.info("(҂‾ ▵‾)︻デ═一 (˚▽˚’!)/")
     logger.info(s"Attempting to snipe reservation")
@@ -28,11 +28,13 @@ class ResyBookingWorkflow(resyClient: ResyClient, resDetails: ReservationDetails
 
     maybeConfigId match {
       case Success(configId) =>
-        val maybeResyTokenResp = snipeReservation(resyClient, resDetails, configId)
+        val maybeResyTokenResp =
+          if (doBook) snipeReservation(resyClient, resDetails, configId)
+          else Success(configId)
 
         maybeResyTokenResp match {
           case Failure(_) if millisToRetry > DateTime.now.getMillis - dateTimeStart =>
-            runnable(dateTimeStart, millisToRetry)
+            runnable(doBook, millisToRetry, dateTimeStart)
           case maybeResyToken => maybeResyToken
         }
       case error => error

@@ -140,6 +140,45 @@ class ResyClient(resyApi: ResyApi) extends Logging {
     }
   }
 
+  def logFindSummary(date: String, partySize: Int, venueId: Int): Unit = {
+    val response = Try {
+      Await.result(
+        awaitable = resyApi.getReservations(date, partySize, venueId),
+        atMost    = 5.seconds
+      )
+    }
+
+    response match {
+      case Success(body) =>
+        val slots = Try {
+          (Json.parse(body) \ "results" \ "venues" \ 0 \ "slots").get
+            .as[JsArray]
+            .value
+            .toSeq
+        }.getOrElse(Seq.empty)
+
+        if (slots.isEmpty) {
+          logger.info(s"No slots returned for venueId=$venueId date=$date partySize=$partySize")
+        } else {
+          val times = slots
+            .flatMap { slot =>
+              Try((slot \ "date" \ "start").get.toString).toOption
+                .map(_.dropWhile(_ != ' ').drop(1).dropRight(1))
+            }
+            .distinct
+            .sorted
+
+          val suffix = if (times.size > 10) ",..." else ""
+          logger.info(
+            s"Found ${slots.size} slot(s) for venueId=$venueId date=$date partySize=$partySize; " +
+              s"times=${times.take(10).mkString(",")}$suffix"
+          )
+        }
+      case Failure(_) =>
+        logger.info(s"Failed to fetch slots for venueId=$venueId date=$date partySize=$partySize")
+    }
+  }
+
   @tailrec
   private[this] def retryFindReservations(
     date: String,
