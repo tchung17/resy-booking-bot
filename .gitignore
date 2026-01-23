@@ -21,3 +21,5 @@ project/target/
 .idea
 .scala_dependencies
 .worksheet
+# Editor
+.vscode/
