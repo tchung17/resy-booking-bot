@@ -13,6 +13,7 @@ val root = Project("resy-booking-bot", file("."))
     semanticdbEnabled := true,
     scalacOptions += "-Ywarn-unused",
     libraryDependencies ++= Seq(
+      "com.github.scopt"         %% "scopt"          % "4.1.0",
       "com.typesafe.play"        %% "play-ahc-ws"     % "2.8.18",
       "com.github.pureconfig"    %% "pureconfig"      % "0.17.2",
       "org.apache.logging.log4j" %% "log4j-api-scala" % "12.0",
