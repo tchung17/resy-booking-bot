@@ -17,7 +17,10 @@ class ResyClientFindSummarySpec extends AnyFlatSpec with Matchers {
     // scalafix:off
     val resyApi: ResyApi = mock(classOf[ResyApi])
     // scalafix:on
-    val resyClient = new ResyClient(resyApi)
+    val resyClient = new ResyClient(
+      resyApi,
+      findSettings = ResyClient.FindSettings(maxInflight = 1, delayMinMs = 0L, delayMaxMs = 0L)
+    )
 
     when(resyApi.getReservationsWithStatus("2099-01-30", 2, 12345))
       .thenReturn(Future((200, Source.fromResource("getReservationsWithVenue.json").mkString)))

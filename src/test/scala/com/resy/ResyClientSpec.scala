@@ -17,7 +17,10 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
   trait Fixture {
     // scalafix:off
     val resyApi: ResyApi = mock(classOf[ResyApi])
-    val resyClient       = new ResyClient(resyApi)
+    val resyClient = new ResyClient(
+      resyApi,
+      findSettings = ResyClient.FindSettings(maxInflight = 1, delayMinMs = 0L, delayMaxMs = 0L)
+    )
     // scalafix:on
   }
 
