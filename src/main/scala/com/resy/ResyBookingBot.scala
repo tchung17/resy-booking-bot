@@ -42,6 +42,19 @@ object ResyBookingBot extends Logging {
       ConfigSource.resources("resyConfig.conf")
   }
 
+  private[resy] def computeNextSnipeTime(now: DateTime, snipeTime: SnipeTime, runNow: Boolean): DateTime = {
+    if (runNow) now
+    else {
+      val todays = now
+        .withHourOfDay(snipeTime.hours)
+        .withMinuteOfHour(snipeTime.minutes)
+        .withSecondOfMinute(0)
+        .withMillisOfSecond(0)
+
+      if (todays.getMillis > now.getMillis) todays else todays.plusDays(1)
+    }
+  }
+
   def main(args: Array[String]): Unit = {
     val builder = OParser.builder[CliOptions]
     val parser = {
@@ -141,6 +154,7 @@ object ResyBookingBot extends Logging {
 
     if (options.debug) {
       System.setProperty("resy.bot.debug", "true")
+      System.setProperty("resy.bot.logLevel", "debug")
       logger.info("Debug logging enabled")
     }
 
@@ -176,18 +190,14 @@ object ResyBookingBot extends Logging {
       )
 
     val dateTimeNow = DateTime.now
-    val todaysSnipeTime = dateTimeNow
-      .withHourOfDay(snipeTime.hours)
-      .withMinuteOfHour(snipeTime.minutes)
-      .withSecondOfMinute(0)
-      .withMillisOfSecond(0)
+    val nextSnipeTime = computeNextSnipeTime(dateTimeNow, snipeTime, options.runNow)
 
     if (options.printNextRun) {
       val millisUntil =
         if (options.runNow) 0L
-        else math.max(0L, todaysSnipeTime.getMillis - DateTime.now.getMillis - 2000)
+        else math.max(0L, nextSnipeTime.getMillis - dateTimeNow.getMillis - 2000)
 
-      println(s"nextSnipeTime=$todaysSnipeTime")
+      println(s"nextSnipeTime=$nextSnipeTime")
       println(s"millisUntilSnipe=$millisUntil")
       return
     }
@@ -197,23 +207,34 @@ object ResyBookingBot extends Logging {
     val resyBookingWorkflow = new ResyBookingWorkflow(resyClient, resDetails)
 
     if (options.findOnly) {
-      resyClient.logFindSummary(resDetails.date, resDetails.partySize, resDetails.venueId)
+      resyClient.logFindSummary(resDetails.date, resDetails.partySize, resDetails.venueId) match {
+        case scala.util.Success(_) => ()
+        case scala.util.Failure(e) =>
+          die(s"Find endpoint failed: ${e.getMessage}", 4)
+      }
       Await.result(ResyApi.shutdown(), 10.seconds)
       return
     }
 
-    val system      = ActorSystem("System")
+    val configPathStr =
+      options.configPath.map(_.toString).getOrElse("classpath:resyConfig.conf")
+    val tokenExpStr =
+      ResyDiagnostics.jwtExpiry(resyKeys.authToken).map(_.toString).getOrElse("unknown")
 
-    if (!options.runNow && todaysSnipeTime.getMillis <= dateTimeNow.getMillis) {
-      logger.error(
-        s"Snipe time $todaysSnipeTime has already passed (now: $dateTimeNow). " +
-          "Failing fast instead of scheduling for tomorrow. " +
-          "Update `snipeTime.*` or use `--run-now` for an immediate attempt."
-      )
-      System.exit(3)
+    logger.info(
+      s"Target: date=${resDetails.date} partySize=${resDetails.partySize} venueId=${resDetails.venueId} " +
+        s"resTimeTypes=${ResyDiagnostics.formatResTimeTypes(resDetails.resTimeTypes)} config=$configPathStr"
+    )
+    logger.info(s"Auth token exp: $tokenExpStr")
+    logger.info("Startup check: querying availability now (find endpoint)")
+    resyClient.logFindSummary(resDetails.date, resDetails.partySize, resDetails.venueId) match {
+      case scala.util.Success(_) => ()
+      case scala.util.Failure(e) =>
+        // Don't sleep for hours if our credentials/network/etc are broken.
+        die(s"Startup check failed (find endpoint): ${e.getMessage}", 4)
     }
 
-    val nextSnipeTime = todaysSnipeTime
+    val system      = ActorSystem("System")
 
     val millisUntilSnipe =
       if (options.runNow) 0L

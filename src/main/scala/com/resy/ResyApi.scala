@@ -5,9 +5,11 @@ import com.resy.ResyApi.{sendGetRequest, sendPostRequest}
 import org.apache.logging.log4j.scala.Logging
 import play.api.libs.ws.WSBodyWritables.writeableOf_String
 import play.api.libs.ws.ahc.AhcWSClient
+import play.api.libs.ws.WSResponse
 
 import java.net.URLEncoder
 import scala.concurrent.Future
+import scala.concurrent.ExecutionContext.Implicits.global
 
 // Resy API docs can be found here http://subzerocbd.info/
 class ResyApi(resyToken: ResyKeys) {
@@ -32,6 +34,21 @@ class ResyApi(resyToken: ResyKeys) {
     )
 
     sendGetRequest(resyToken, "api.resy.com/4/find", findResQueryParams)
+  }
+
+  /** Same as getReservations, but preserves HTTP status for better diagnostics. */
+  def getReservationsWithStatus(date: String, partySize: Int, venueId: Int): Future[(Int, String)] = {
+    val findResQueryParams = Map(
+      "lat"        -> "0",
+      "long"       -> "0",
+      "day"        -> date,
+      "party_size" -> partySize.toString,
+      "venue_id"   -> venueId.toString
+    )
+
+    ResyApi
+      .sendGetRequestResponse(resyToken, "api.resy.com/4/find", findResQueryParams)
+      .map(r => (r.status, r.body))
   }
 
   /** Get details of the reservation
@@ -102,6 +119,21 @@ object ResyApi extends Logging {
       .withHttpHeaders(createHeaders(resyKeys): _*)
       .get
       .map(_.body)(system.dispatcher)
+  }
+
+  private[resy] def sendGetRequestResponse(
+    resyKeys: ResyKeys,
+    baseUrl: String,
+    queryParams: Map[String, String]
+  ): Future[WSResponse] = {
+    val url =
+      s"https://$baseUrl?${stringifyQueryParams(queryParams)}"
+
+    logger.debug(s"URL Request: $url")
+
+    ws.url(url)
+      .withHttpHeaders(createHeaders(resyKeys): _*)
+      .get
   }
 
   private def sendPostRequest(

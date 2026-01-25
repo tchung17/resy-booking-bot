@@ -1,0 +1,33 @@
+{
+  "results": {
+    "venues": [
+      {
+        "venue": {
+          "id": 12345,
+          "name": "Testaurant"
+        },
+        "slots": [
+          {
+            "config": {
+              "type": "TABLE_TYPE1",
+              "token": "CONFIG_ID1"
+            },
+            "date": {
+              "start": "2099-01-30 16:00:00"
+            }
+          },
+          {
+            "config": {
+              "type": "TABLE_TYPE2",
+              "token": "CONFIG_ID2"
+            },
+            "date": {
+              "start": "2099-01-30 17:00:00"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+

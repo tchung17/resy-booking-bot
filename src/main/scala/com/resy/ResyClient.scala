@@ -16,6 +16,7 @@ class ResyClient(resyApi: ResyApi) extends Logging {
   private type TableTypeMap   = Map[String, String]
 
   import ResyClientErrorMessages._
+  import ResyClient._
 
   /** Tries to find a reservation based on the priority list of requested reservations times. Due to
     * race condition of when the bot runs and when the times become available, retry may be
@@ -140,42 +141,61 @@ class ResyClient(resyApi: ResyApi) extends Logging {
     }
   }
 
-  def logFindSummary(date: String, partySize: Int, venueId: Int): Unit = {
-    val response = Try {
-      Await.result(
-        awaitable = resyApi.getReservations(date, partySize, venueId),
-        atMost    = 5.seconds
-      )
+  /** Calls the "find" endpoint and parses a small summary (for startup sanity checks, etc). */
+  def getFindSummary(date: String, partySize: Int, venueId: Int): Try[FindSummary] = Try {
+    val (status, body) = Await.result(
+      awaitable = resyApi.getReservationsWithStatus(date, partySize, venueId),
+      atMost    = 5.seconds
+    )
+
+    // Resy returns JSON error bodies for auth failures; preserve a snippet for logs.
+    if (status / 100 != 2) {
+      val snippet = body.take(400).replaceAll("\\s+", " ")
+      throw new RuntimeException(s"find endpoint HTTP $status body=${snippet}")
     }
 
-    response match {
-      case Success(body) =>
-        val slots = Try {
-          (Json.parse(body) \ "results" \ "venues" \ 0 \ "slots").get
-            .as[JsArray]
-            .value
-            .toSeq
-        }.getOrElse(Seq.empty)
+    val json     = Json.parse(body)
+    val venueObj = (json \ "results" \ "venues" \ 0)
 
-        if (slots.isEmpty) {
-          logger.info(s"No slots returned for venueId=$venueId date=$date partySize=$partySize")
-        } else {
-          val times = slots
-            .flatMap { slot =>
-              Try((slot \ "date" \ "start").get.toString).toOption
-                .map(_.dropWhile(_ != ' ').drop(1).dropRight(1))
-            }
-            .distinct
-            .sorted
+    val venueName =
+      (venueObj \ "venue" \ "name").asOpt[String]
+        .orElse((venueObj \ "venue" \ "display_name").asOpt[String])
+        .orElse((venueObj \ "name").asOpt[String])
 
-          val suffix = if (times.size > 10) ",..." else ""
-          logger.info(
-            s"Found ${slots.size} slot(s) for venueId=$venueId date=$date partySize=$partySize; " +
-              s"times=${times.take(10).mkString(",")}$suffix"
-          )
-        }
-      case Failure(_) =>
-        logger.info(s"Failed to fetch slots for venueId=$venueId date=$date partySize=$partySize")
+    val slots =
+      (venueObj \ "slots").asOpt[JsArray]
+        .map(_.value.toSeq)
+        .getOrElse(Seq.empty)
+
+    val times = slots
+      .flatMap { slot =>
+        (slot \ "date" \ "start").asOpt[String]
+          .map(_.dropWhile(_ != ' ').drop(1))
+      }
+      .distinct
+      .sorted
+
+    FindSummary(venueName = venueName, slotCount = slots.size, times = times)
+  }
+
+  def logFindSummary(date: String, partySize: Int, venueId: Int): Try[FindSummary] = {
+    getFindSummary(date, partySize, venueId).map { summary =>
+      val venueStr = summary.venueName.map(n => s"venue=\"$n\" ").getOrElse("")
+      if (summary.slotCount == 0) {
+        logger.info(s"${venueStr}No slots returned for venueId=$venueId date=$date partySize=$partySize")
+      } else {
+        val suffix = if (summary.times.size > 10) ",..." else ""
+        logger.info(
+          s"${venueStr}Found ${summary.slotCount} slot(s) for venueId=$venueId date=$date partySize=$partySize; " +
+            s"times=${summary.times.take(10).mkString(",")}$suffix"
+        )
+      }
+      summary
+    } recoverWith { case e =>
+      logger.info(
+        s"Failed to fetch slots for venueId=$venueId date=$date partySize=$partySize (${e.getMessage})"
+      )
+      Failure(e)
     }
   }
 
@@ -263,6 +283,10 @@ class ResyClient(resyApi: ResyApi) extends Logging {
           reservationMap.updated(time, reservationMap(time).updated(tableType, configId))
       }
   }
+}
+
+object ResyClient {
+  final case class FindSummary(venueName: Option[String], slotCount: Int, times: Seq[String])
 }
 
 object ResyClientErrorMessages {
