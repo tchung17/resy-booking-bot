@@ -257,7 +257,14 @@ class ResyClient(
     attemptResult match {
       case Success((reservationMap, info)) =>
         runInfo.foreach(ri => events.findAttempt(ri, info))
-        if (reservationMap.nonEmpty) findReservationTime(reservationMap, resTimeTypes)
+        if (reservationMap.nonEmpty)
+          findReservationTime(reservationMap, resTimeTypes) match {
+            case s @ Success(_) => s
+            case Failure(_) if millisToRetry > DateTime.now.getMillis - dateTimeStart =>
+              // Treat "slots exist but none match requested time/type" as retriable within the window.
+              retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1)
+            case Failure(e) => Failure(e)
+          }
         else if (millisToRetry > DateTime.now.getMillis - dateTimeStart)
           retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1)
         else {

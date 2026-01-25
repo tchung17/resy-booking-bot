@@ -23,7 +23,8 @@ class ResyBookingWorkflow(resyClient: ResyClient, resDetails: ReservationDetails
       date         = resDetails.date,
       partySize    = resDetails.partySize,
       venueId      = resDetails.venueId,
-      resTimeTypes = resDetails.resTimeTypes
+      resTimeTypes = resDetails.resTimeTypes,
+      millisToRetry = millisToRetry
     )
 
     maybeConfigId match {

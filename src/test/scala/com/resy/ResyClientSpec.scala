@@ -184,7 +184,8 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
       date         = resDetails.date,
       partySize    = resDetails.partySize,
       venueId      = resDetails.venueId,
-      resTimeTypes = Seq(ReservationTimeType("18:00:00", "TABLE_TYPE_DOES_NOT_EXIST"))
+      resTimeTypes = Seq(ReservationTimeType("18:00:00", "TABLE_TYPE_DOES_NOT_EXIST")),
+      millisToRetry = 0L
     ) match {
       case Failure(exception) =>
         exception match {
@@ -204,7 +205,8 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
       date         = resDetails.date,
       partySize    = resDetails.partySize,
       venueId      = resDetails.venueId,
-      resTimeTypes = Seq(ReservationTimeType("12:34:56", "TABLE_TYPE5"))
+      resTimeTypes = Seq(ReservationTimeType("12:34:56", "TABLE_TYPE5")),
+      millisToRetry = 0L
     ) match {
       case Failure(exception) =>
         exception match {
@@ -224,7 +226,8 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
       date         = resDetails.date,
       partySize    = resDetails.partySize,
       venueId      = resDetails.venueId,
-      resTimeTypes = Seq(ReservationTimeType("12:34:56", "TABLE_TYPE_DOES_NOT_EXIST"))
+      resTimeTypes = Seq(ReservationTimeType("12:34:56", "TABLE_TYPE_DOES_NOT_EXIST")),
+      millisToRetry = 0L
     ) match {
       case Failure(exception) =>
         exception match {
@@ -234,6 +237,27 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
         }
       case _ => fail("Failure not found")
     }
+  }
+
+  it should "retry when slots exist but target time/type is not present yet" in new Fixture {
+    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
+      .thenReturn(Future(Source.fromResource("getReservationsNoTargetTime.json").mkString))
+      .thenReturn(Future(Source.fromResource("getReservations.json").mkString))
+
+    resyClient.findReservations(
+      date          = resDetails.date,
+      partySize     = resDetails.partySize,
+      venueId       = resDetails.venueId,
+      resTimeTypes  = resDetails.resTimeTypes,
+      millisToRetry = (1 second).toMillis
+    ) shouldEqual Success("CONFIG_ID5")
+
+    verify(resyApi, Mockito.times(2))
+      .getReservations(
+        date      = resDetails.date,
+        partySize = resDetails.partySize,
+        venueId   = resDetails.venueId
+      )
   }
 
   it should "get reservation details" in new Fixture {
