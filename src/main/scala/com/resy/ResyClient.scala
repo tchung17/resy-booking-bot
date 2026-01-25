@@ -5,7 +5,8 @@ import org.joda.time.DateTime
 import play.api.libs.json.{JsArray, JsValue, Json}
 
 import scala.annotation.tailrec
-import scala.concurrent.Await
+import scala.concurrent.{Await, Future, Promise}
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
@@ -13,7 +14,8 @@ import scala.util.{Failure, Success, Try}
 class ResyClient(
   resyApi: ResyApi,
   events: ResyEventSink = ResyEventSink.noop,
-  runInfo: Option[ResyRunInfo] = None
+  runInfo: Option[ResyRunInfo] = None,
+  findSettings: ResyClient.FindSettings = ResyClient.FindSettings.fromEnv()
 ) extends Logging {
 
   private type ReservationMap = Map[String, TableTypeMap]
@@ -46,15 +48,19 @@ class ResyClient(
     resTimeTypes: Seq[ReservationTimeType],
     millisToRetry: Long = (10 seconds).toMillis
   ): Try[String] =
-    retryFindReservations(
-      date,
-      partySize,
-      venueId,
-      resTimeTypes,
-      millisToRetry,
-      DateTime.now.getMillis,
-      attempt = 1
-    )
+    if (findSettings.maxInflight <= 1)
+      retryFindReservations(
+        date,
+        partySize,
+        venueId,
+        resTimeTypes,
+        millisToRetry,
+        DateTime.now.getMillis,
+        attempt  = 1,
+        sawSlots = false
+      )
+    else
+      findReservationsParallel(date, partySize, venueId, resTimeTypes, millisToRetry)
 
   /** Get details of the reservation
     * @param configId
@@ -213,82 +219,35 @@ class ResyClient(
     resTimeTypes: Seq[ReservationTimeType],
     millisToRetry: Long,
     dateTimeStart: Long,
-    attempt: Int
+    attempt: Int,
+    sawSlots: Boolean
   ): Try[String] = {
-    val attemptResult: Try[(ReservationMap, ResyFindAttemptInfo)] = Try {
-      val response = Await.result(
-        awaitable = resyApi.getReservations(date, partySize, venueId),
-        atMost    = 10 seconds
-      )
-
-      logger.debug(s"URL Response: $response")
-
-      val json     = Json.parse(response)
-      val venueObj = (json \ "results" \ "venues" \ 0)
-
-      val venueName =
-        (venueObj \ "venue" \ "name").asOpt[String]
-          .orElse((venueObj \ "venue" \ "display_name").asOpt[String])
-          .orElse((venueObj \ "name").asOpt[String])
-
-      val slots =
-        (venueObj \ "slots").asOpt[JsArray]
-          .map(_.value.toSeq)
-          .getOrElse(Seq.empty)
-
-      val reservationMap = buildReservationMap(slots)
-      val timeToTableTypes =
-        reservationMap.map { case (time, tableTypes) =>
-          time -> tableTypes.keys.toSeq.sorted
-        }
-
-      val info =
-        ResyFindAttemptInfo(
-          attempt          = attempt,
-          venueName        = venueName,
-          slotCount        = slots.size,
-          times            = reservationMap.keys.toSeq.sorted,
-          timeToTableTypes = timeToTableTypes
-        )
-
-      (reservationMap, info)
-    }
+    val attemptResult: Try[(ReservationMap, ResyFindAttemptInfo)] =
+      fetchReservationMapAttempt(date, partySize, venueId, attempt)
 
     attemptResult match {
       case Success((reservationMap, info)) =>
         runInfo.foreach(ri => events.findAttempt(ri, info))
-        if (reservationMap.nonEmpty)
-          findReservationTime(reservationMap, resTimeTypes) match {
-            case s @ Success(_) => s
-            case Failure(_) if millisToRetry > DateTime.now.getMillis - dateTimeStart =>
-              // Treat "slots exist but none match requested time/type" as retriable within the window.
-              retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1)
-            case Failure(e) => Failure(e)
+        val isWithinWindow = millisToRetry > DateTime.now.getMillis - dateTimeStart
+        val nextSawSlots   = sawSlots || reservationMap.nonEmpty
+
+        if (reservationMap.nonEmpty) {
+          selectConfigId(reservationMap, resTimeTypes) match {
+            case Some(configId) =>
+              logger.info(s"Config Id: $configId")
+              Success(configId)
+            case None if isWithinWindow =>
+              retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1, nextSawSlots)
+            case None =>
+              miss(cantFindResMsg)
           }
-        else if (millisToRetry > DateTime.now.getMillis - dateTimeStart)
-          retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1)
-        else {
-          logger.info("Missed the shot!")
-          logger.info("""┻━┻ ︵ \(°□°)/ ︵ ┻━┻""")
-          logger.info(noAvailableResMsg)
-          Failure(new RuntimeException(noAvailableResMsg))
-        }
-      case Failure(e) if millisToRetry > DateTime.now.getMillis - dateTimeStart =>
-        runInfo.foreach { ri =>
-          events.findAttempt(
-            ri,
-            ResyFindAttemptInfo(
-              attempt          = attempt,
-              venueName        = None,
-              slotCount        = 0,
-              times            = Nil,
-              timeToTableTypes = Map.empty,
-              error            = Some(e.getMessage)
-            )
-          )
-        }
-        retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1)
+        } else if (isWithinWindow)
+          retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1, nextSawSlots)
+        else
+          miss(noAvailableResMsg)
+
       case Failure(e) =>
+        val isWithinWindow = millisToRetry > DateTime.now.getMillis - dateTimeStart
         runInfo.foreach { ri =>
           events.findAttempt(
             ri,
@@ -302,37 +261,150 @@ class ResyClient(
             )
           )
         }
-        logger.info("Missed the shot!")
-        logger.info("""┻━┻ ︵ \(°□°)/ ︵ ┻━┻""")
-        logger.info(noAvailableResMsg)
-        Failure(new RuntimeException(noAvailableResMsg))
+        if (isWithinWindow)
+          retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1, sawSlots)
+        else if (sawSlots)
+          miss(cantFindResMsg)
+        else
+          miss(noAvailableResMsg)
     }
   }
 
-  @tailrec
-  private[this] def findReservationTime(
-    reservationMap: ReservationMap,
-    resTimeTypes: Seq[ReservationTimeType]
+  private[this] def findReservationsParallel(
+    date: String,
+    partySize: Int,
+    venueId: Int,
+    resTimeTypes: Seq[ReservationTimeType],
+    millisToRetry: Long
   ): Try[String] = {
-    val results = reservationMap.get(resTimeTypes.head.reservationTime).flatMap { tableTypes =>
-      resTimeTypes.head.tableType match {
-        case Some(tableType) if tableType.nonEmpty => tableTypes.get(tableType.toLowerCase)
-        case _                                     => Some(tableTypes.head._2)
-      }
+    if (millisToRetry <= 0L) return miss(noAvailableResMsg)
+
+    val startMs  = DateTime.now.getMillis
+    val stopAtMs = startMs + millisToRetry
+
+    val promise  = Promise[String]()
+    val sawSlots = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val attempt  = new java.util.concurrent.atomic.AtomicInteger(0)
+
+    def timeRemainingMs: Long = stopAtMs - DateTime.now.getMillis
+
+    def workerLoop(): Unit = {
+      val remaining = timeRemainingMs
+      if (promise.isCompleted || remaining <= 0L) return
+
+      val delayMs = findSettings.nextDelayMs()
+
+      ResyClient.findScheduler.schedule(
+        new Runnable {
+          override def run(): Unit = {
+            val remainingInner = timeRemainingMs
+            if (promise.isCompleted || remainingInner <= 0L) return
+
+            val attemptNo = attempt.incrementAndGet()
+            Future {
+              val attemptResult = fetchReservationMapAttempt(date, partySize, venueId, attemptNo)
+              attemptResult match {
+                case Success((reservationMap, info)) =>
+                  runInfo.foreach(ri => events.findAttempt(ri, info))
+                  if (reservationMap.nonEmpty) sawSlots.set(true)
+                  selectConfigId(reservationMap, resTimeTypes).foreach { configId =>
+                    if (promise.trySuccess(configId)) logger.info(s"Config Id: $configId")
+                  }
+                case Failure(e) =>
+                  runInfo.foreach { ri =>
+                    events.findAttempt(
+                      ri,
+                      ResyFindAttemptInfo(
+                        attempt          = attemptNo,
+                        venueName        = None,
+                        slotCount        = 0,
+                        times            = Nil,
+                        timeToTableTypes = Map.empty,
+                        error            = Some(e.getMessage)
+                      )
+                    )
+                  }
+              }
+            }.andThen { case _ => workerLoop() }
+            ()
+          }
+        },
+        delayMs,
+        java.util.concurrent.TimeUnit.MILLISECONDS
+      )
     }
 
-    results match {
-      case Some(configId) =>
-        logger.info(s"Config Id: $configId")
-        Success(configId)
-      case None if resTimeTypes.tail.nonEmpty =>
-        findReservationTime(reservationMap, resTimeTypes.tail)
-      case _ =>
-        logger.info("Missed the shot!")
-        logger.info("""┻━┻ ︵ \(°□°)/ ︵ ┻━┻""")
-        logger.info(cantFindResMsg)
-        Failure(new RuntimeException(cantFindResMsg))
+    (1 to findSettings.maxInflight).foreach(_ => workerLoop())
+
+    try Success(Await.result(promise.future, millisToRetry.millis))
+    catch {
+      case _: java.util.concurrent.TimeoutException =>
+        if (sawSlots.get()) miss(cantFindResMsg) else miss(noAvailableResMsg)
     }
+  }
+
+  private[this] def selectConfigId(
+    reservationMap: ReservationMap,
+    resTimeTypes: Seq[ReservationTimeType]
+  ): Option[String] =
+    resTimeTypes.iterator.flatMap { pref =>
+      reservationMap.get(pref.reservationTime).flatMap { tableTypes =>
+        pref.tableType match {
+          case Some(tableType) if tableType.nonEmpty => tableTypes.get(tableType.toLowerCase)
+          case _                                     => tableTypes.headOption.map(_._2)
+        }
+      }
+    }.take(1).toSeq.headOption
+
+  private[this] def fetchReservationMapAttempt(
+    date: String,
+    partySize: Int,
+    venueId: Int,
+    attempt: Int
+  ): Try[(ReservationMap, ResyFindAttemptInfo)] = Try {
+    val response = Await.result(
+      awaitable = resyApi.getReservations(date, partySize, venueId),
+      atMost    = 10 seconds
+    )
+
+    logger.debug(s"URL Response: $response")
+
+    val json     = Json.parse(response)
+    val venueObj = (json \ "results" \ "venues" \ 0)
+
+    val venueName =
+      (venueObj \ "venue" \ "name").asOpt[String]
+        .orElse((venueObj \ "venue" \ "display_name").asOpt[String])
+        .orElse((venueObj \ "name").asOpt[String])
+
+    val slots =
+      (venueObj \ "slots").asOpt[JsArray]
+        .map(_.value.toSeq)
+        .getOrElse(Seq.empty)
+
+    val reservationMap = buildReservationMap(slots)
+    val timeToTableTypes =
+      reservationMap.map { case (time, tableTypes) =>
+        time -> tableTypes.keys.toSeq.sorted
+      }
+
+    val info =
+      ResyFindAttemptInfo(
+        attempt          = attempt,
+        venueName        = venueName,
+        slotCount        = slots.size,
+        times            = reservationMap.keys.toSeq.sorted,
+        timeToTableTypes = timeToTableTypes
+      )
+
+    (reservationMap, info)
+  }
+
+  private[this] def miss(message: String): Failure[String] = {
+    logger.info("Missed the shot!")
+    logger.info("""┻━┻ ︵ \(°□°)/ ︵ ┻━┻""")
+    logger.info(message)
+    Failure(new RuntimeException(message))
   }
 
   private[this] def buildReservationMap(reservationTimes: Seq[JsValue]): ReservationMap = {
@@ -357,6 +429,40 @@ class ResyClient(
 
 object ResyClient {
   final case class FindSummary(venueName: Option[String], slotCount: Int, times: Seq[String])
+
+  final case class FindSettings(
+    maxInflight: Int,
+    delayMinMs: Long,
+    delayMaxMs: Long
+  ) {
+    def nextDelayMs(): Long = {
+      val min = math.max(0L, delayMinMs)
+      val max = math.max(min, delayMaxMs)
+      if (max == min) min
+      else java.util.concurrent.ThreadLocalRandom.current().nextLong(min, max + 1)
+    }
+  }
+
+  object FindSettings {
+    def fromEnv(env: Map[String, String] = sys.env): FindSettings = {
+      val maxInflight = env.get("RESY_FIND_CONCURRENCY").flatMap(_.toIntOption).getOrElse(1).max(1)
+      val delayMinMs  = env.get("RESY_FIND_DELAY_MIN_MS").flatMap(_.toLongOption).getOrElse(250L).max(0L)
+      val delayMaxMs  = env.get("RESY_FIND_DELAY_MAX_MS").flatMap(_.toLongOption).getOrElse(500L).max(delayMinMs)
+      FindSettings(maxInflight = maxInflight, delayMinMs = delayMinMs, delayMaxMs = delayMaxMs)
+    }
+  }
+
+  private[resy] lazy val findScheduler: java.util.concurrent.ScheduledExecutorService = {
+    val threadFactory = new java.util.concurrent.ThreadFactory {
+      override def newThread(r: Runnable): Thread = {
+        val t = new Thread(r)
+        t.setName("resy-find-scheduler")
+        t.setDaemon(true)
+        t
+      }
+    }
+    java.util.concurrent.Executors.newSingleThreadScheduledExecutor(threadFactory)
+  }
 }
 
 object ResyClientErrorMessages {

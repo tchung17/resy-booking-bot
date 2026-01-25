@@ -6,7 +6,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.Future
+import scala.concurrent.{Future, Promise}
 import scala.concurrent.duration._
 import scala.io.Source
 import scala.language.postfixOps
@@ -253,6 +253,39 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
     ) shouldEqual Success("CONFIG_ID5")
 
     verify(resyApi, Mockito.times(2))
+      .getReservations(
+        date      = resDetails.date,
+        partySize = resDetails.partySize,
+        venueId   = resDetails.venueId
+      )
+  }
+
+  it should "find an available reservation with parallel /find requests" in {
+    val resyApi: ResyApi = mock(classOf[ResyApi]) // scalafix:off
+    val resyClient = new ResyClient(
+      resyApi,
+      findSettings = ResyClient.FindSettings(maxInflight = 2, delayMinMs = 0L, delayMaxMs = 0L)
+    ) // scalafix:on
+
+    val stalled = Promise[String]()
+    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
+      .thenReturn(stalled.future)
+      .thenReturn(Future(Source.fromResource("getReservations.json").mkString))
+
+    val result =
+      resyClient.findReservations(
+        date          = resDetails.date,
+        partySize     = resDetails.partySize,
+        venueId       = resDetails.venueId,
+        resTimeTypes  = resDetails.resTimeTypes,
+        millisToRetry = (1 second).toMillis
+      )
+
+    // Unblock any still-running /find attempt (we currently don't cancel in-flight requests).
+    stalled.trySuccess(Source.fromResource("getReservationsNoTargetTime.json").mkString)
+
+    result shouldEqual Success("CONFIG_ID5")
+    verify(resyApi, Mockito.atLeast(2))
       .getReservations(
         date      = resDetails.date,
         partySize = resDetails.partySize,
