@@ -10,7 +10,11 @@ import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 
-class ResyClient(resyApi: ResyApi) extends Logging {
+class ResyClient(
+  resyApi: ResyApi,
+  events: ResyEventSink = ResyEventSink.noop,
+  runInfo: Option[ResyRunInfo] = None
+) extends Logging {
 
   private type ReservationMap = Map[String, TableTypeMap]
   private type TableTypeMap   = Map[String, String]
@@ -48,7 +52,8 @@ class ResyClient(resyApi: ResyApi) extends Logging {
       venueId,
       resTimeTypes,
       millisToRetry,
-      DateTime.now.getMillis
+      DateTime.now.getMillis,
+      attempt = 1
     )
 
   /** Get details of the reservation
@@ -65,7 +70,7 @@ class ResyClient(resyApi: ResyApi) extends Logging {
     val bookingDetailsResp = Try {
       val response = Await.result(
         awaitable = resyApi.getReservationDetails(configId, date, partySize),
-        atMost    = 5 seconds
+        atMost    = 10 seconds
       )
 
       logger.debug(s"URL Response: $response")
@@ -145,7 +150,7 @@ class ResyClient(resyApi: ResyApi) extends Logging {
   def getFindSummary(date: String, partySize: Int, venueId: Int): Try[FindSummary] = Try {
     val (status, body) = Await.result(
       awaitable = resyApi.getReservationsWithStatus(date, partySize, venueId),
-      atMost    = 5.seconds
+      atMost    = 10.seconds
     )
 
     // Resy returns JSON error bodies for auth failures; preserve a snippet for logs.
@@ -190,6 +195,7 @@ class ResyClient(resyApi: ResyApi) extends Logging {
             s"times=${summary.times.take(10).mkString(",")}$suffix"
         )
       }
+      runInfo.foreach(ri => events.findSummary(ri, summary))
       summary
     } recoverWith { case e =>
       logger.info(
@@ -206,32 +212,89 @@ class ResyClient(resyApi: ResyApi) extends Logging {
     venueId: Int,
     resTimeTypes: Seq[ReservationTimeType],
     millisToRetry: Long,
-    dateTimeStart: Long
+    dateTimeStart: Long,
+    attempt: Int
   ): Try[String] = {
-    val reservationTimesResp: Try[ReservationMap] = Try {
+    val attemptResult: Try[(ReservationMap, ResyFindAttemptInfo)] = Try {
       val response = Await.result(
         awaitable = resyApi.getReservations(date, partySize, venueId),
-        atMost    = 5 seconds
+        atMost    = 10 seconds
       )
 
       logger.debug(s"URL Response: $response")
 
-      // Searching this JSON list structure...
-      // {"results": {"venues": [{"slots": [{...}, {...}]}]}}
-      buildReservationMap(
-        (Json.parse(response) \ "results" \ "venues" \ 0 \ "slots").get
-          .as[JsArray]
-          .value
-          .toSeq
-      )
+      val json     = Json.parse(response)
+      val venueObj = (json \ "results" \ "venues" \ 0)
+
+      val venueName =
+        (venueObj \ "venue" \ "name").asOpt[String]
+          .orElse((venueObj \ "venue" \ "display_name").asOpt[String])
+          .orElse((venueObj \ "name").asOpt[String])
+
+      val slots =
+        (venueObj \ "slots").asOpt[JsArray]
+          .map(_.value.toSeq)
+          .getOrElse(Seq.empty)
+
+      val reservationMap = buildReservationMap(slots)
+      val timeToTableTypes =
+        reservationMap.map { case (time, tableTypes) =>
+          time -> tableTypes.keys.toSeq.sorted
+        }
+
+      val info =
+        ResyFindAttemptInfo(
+          attempt          = attempt,
+          venueName        = venueName,
+          slotCount        = slots.size,
+          times            = reservationMap.keys.toSeq.sorted,
+          timeToTableTypes = timeToTableTypes
+        )
+
+      (reservationMap, info)
     }
 
-    reservationTimesResp match {
-      case Success(reservationMap) if reservationMap.nonEmpty =>
-        findReservationTime(reservationMap, resTimeTypes)
-      case _ if millisToRetry > DateTime.now.getMillis - dateTimeStart =>
-        retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart)
-      case _ =>
+    attemptResult match {
+      case Success((reservationMap, info)) =>
+        runInfo.foreach(ri => events.findAttempt(ri, info))
+        if (reservationMap.nonEmpty) findReservationTime(reservationMap, resTimeTypes)
+        else if (millisToRetry > DateTime.now.getMillis - dateTimeStart)
+          retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1)
+        else {
+          logger.info("Missed the shot!")
+          logger.info("""┻━┻ ︵ \(°□°)/ ︵ ┻━┻""")
+          logger.info(noAvailableResMsg)
+          Failure(new RuntimeException(noAvailableResMsg))
+        }
+      case Failure(e) if millisToRetry > DateTime.now.getMillis - dateTimeStart =>
+        runInfo.foreach { ri =>
+          events.findAttempt(
+            ri,
+            ResyFindAttemptInfo(
+              attempt          = attempt,
+              venueName        = None,
+              slotCount        = 0,
+              times            = Nil,
+              timeToTableTypes = Map.empty,
+              error            = Some(e.getMessage)
+            )
+          )
+        }
+        retryFindReservations(date, partySize, venueId, resTimeTypes, millisToRetry, dateTimeStart, attempt + 1)
+      case Failure(e) =>
+        runInfo.foreach { ri =>
+          events.findAttempt(
+            ri,
+            ResyFindAttemptInfo(
+              attempt          = attempt,
+              venueName        = None,
+              slotCount        = 0,
+              times            = Nil,
+              timeToTableTypes = Map.empty,
+              error            = Some(e.getMessage)
+            )
+          )
+        }
         logger.info("Missed the shot!")
         logger.info("""┻━┻ ︵ \(°□°)/ ︵ ┻━┻""")
         logger.info(noAvailableResMsg)

@@ -1,15 +1,13 @@
 package com.resy
 
-import akka.actor.ActorSystem
 import com.resy.ResyApi.{sendGetRequest, sendPostRequest}
 import org.apache.logging.log4j.scala.Logging
-import play.api.libs.ws.WSBodyWritables.writeableOf_String
-import play.api.libs.ws.ahc.AhcWSClient
-import play.api.libs.ws.WSResponse
+import play.api.libs.json.Json
 
 import java.net.URLEncoder
 import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
 
 // Resy API docs can be found here http://subzerocbd.info/
 class ResyApi(resyToken: ResyKeys) {
@@ -25,30 +23,14 @@ class ResyApi(resyToken: ResyKeys) {
     *   JSON object of available reservation times and seating types for that day
     */
   def getReservations(date: String, partySize: Int, venueId: Int): Future[String] = {
-    val findResQueryParams = Map(
-      "lat"        -> "0",
-      "long"       -> "0",
-      "day"        -> date,
-      "party_size" -> partySize.toString,
-      "venue_id"   -> venueId.toString
-    )
-
-    sendGetRequest(resyToken, "api.resy.com/4/find", findResQueryParams)
+    ResyApi.sendFindRequest(resyToken, date, partySize, venueId)
   }
 
   /** Same as getReservations, but preserves HTTP status for better diagnostics. */
   def getReservationsWithStatus(date: String, partySize: Int, venueId: Int): Future[(Int, String)] = {
-    val findResQueryParams = Map(
-      "lat"        -> "0",
-      "long"       -> "0",
-      "day"        -> date,
-      "party_size" -> partySize.toString,
-      "venue_id"   -> venueId.toString
-    )
-
     ResyApi
-      .sendGetRequestResponse(resyToken, "api.resy.com/4/find", findResQueryParams)
-      .map(r => (r.status, r.body))
+      .sendFindRequestResponse(resyToken, date, partySize, venueId)
+      .map { case (status, body, _) => (status, body) }
   }
 
   /** Get details of the reservation
@@ -91,19 +73,16 @@ class ResyApi(resyToken: ResyKeys) {
 }
 
 object ResyApi extends Logging {
-  implicit private val system: ActorSystem = ActorSystem()
-  private val ws                           = AhcWSClient()
-  @volatile private var isShutdown          = false
-
-  def shutdown(): Future[Unit] = synchronized {
-    if (isShutdown) Future.successful(())
-    else {
-      isShutdown = true
-      try ws.close()
-      catch { case _: Throwable => () }
-      system.terminate().map(_ => ())(system.dispatcher)
-    }
+  private lazy val proxy: Option[ResyProxy] = {
+    val p = ResyProxy.fromEnv()
+    p.foreach(pp => logger.info(s"HTTP proxy enabled: ${pp.redacted}"))
+    p
   }
+  private lazy val http                     = new CurlHttpClient(proxy)
+
+  def selectedProxy: Option[ResyProxy] = proxy
+
+  def shutdown(): Future[Unit] = Future.successful(())
 
   private def sendGetRequest(
     resyKeys: ResyKeys,
@@ -115,25 +94,64 @@ object ResyApi extends Logging {
 
     logger.debug(s"URL Request: $url")
 
-    ws.url(url)
-      .withHttpHeaders(createHeaders(resyKeys): _*)
-      .get
-      .map(_.body)(system.dispatcher)
+    Future {
+      http
+        .request(
+          method  = "GET",
+          url     = url,
+          headers = createHeaders(resyKeys),
+          body    = None,
+          timeout = 10.seconds
+        )
+        .body
+    }
   }
 
-  private[resy] def sendGetRequestResponse(
+  private[resy] def sendFindRequest(
     resyKeys: ResyKeys,
-    baseUrl: String,
-    queryParams: Map[String, String]
-  ): Future[WSResponse] = {
-    val url =
-      s"https://$baseUrl?${stringifyQueryParams(queryParams)}"
+    date: String,
+    partySize: Int,
+    venueId: Int
+  ): Future[String] =
+    sendFindRequestResponse(resyKeys, date, partySize, venueId).map { case (_, body, _) => body }
+
+  /** Mirrors the Resy web app's /4/find behavior (POST+JSON) to reduce WAF variance. */
+  private[resy] def sendFindRequestResponse(
+    resyKeys: ResyKeys,
+    date: String,
+    partySize: Int,
+    venueId: Int
+  ): Future[(Int, String, String)] = {
+    val url = "https://api.resy.com/4/find"
+    val bodyJson = Json.obj(
+      "lat"        -> 0,
+      "long"       -> 0,
+      "day"        -> date,
+      "party_size" -> partySize,
+      "venue_id"   -> venueId
+    )
 
     logger.debug(s"URL Request: $url")
 
-    ws.url(url)
-      .withHttpHeaders(createHeaders(resyKeys): _*)
-      .get
+    val headers =
+      createHeaders(resyKeys) ++ Seq(
+        "accept"                -> "application/json, text/plain, */*",
+        "content-type"          -> "application/json",
+        "origin"                -> "https://resy.com",
+        "referer"               -> "https://resy.com/",
+        "x-origin"              -> "https://resy.com"
+      )
+
+    Future {
+      val resp = http.request(
+        method  = "POST",
+        url     = url,
+        headers = headers,
+        body    = Some(Json.stringify(bodyJson)),
+        timeout = 10.seconds
+      )
+      (resp.status, resp.body, resp.headers)
+    }
   }
 
   private def sendPostRequest(
@@ -147,22 +165,31 @@ object ResyApi extends Logging {
     logger.debug(s"URL Request: $url")
     logger.debug(s"Post Params: $post")
 
-    ws.url(url)
-      .withHttpHeaders(
-        createHeaders(resyKeys) ++ Seq(
-          "Content-Type" -> "application/x-www-form-urlencoded",
-          "Origin"       -> "https://widgets.resy.com",
-          "Referer"      -> "https://widgets.resy.com/"
-        ): _*
+    val headers =
+      createHeaders(resyKeys) ++ Seq(
+        "Content-Type" -> "application/x-www-form-urlencoded",
+        "Origin"       -> "https://widgets.resy.com",
+        "Referer"      -> "https://widgets.resy.com/"
       )
-      .post(post)
-      .map(_.body)(system.dispatcher)
+
+    Future {
+      http
+        .request(
+          method  = "POST",
+          url     = url,
+          headers = headers,
+          body    = Some(post),
+          timeout = 10.seconds
+        )
+        .body
+    }
   }
 
   private[this] def createHeaders(resyKeys: ResyKeys): Seq[(String, String)] = {
     Seq(
       "Authorization"     -> s"""ResyAPI api_key="${resyKeys.apiKey}"""",
-      "x-resy-auth-token" -> resyKeys.authToken
+      "x-resy-auth-token" -> resyKeys.authToken,
+      "x-resy-universal-auth" -> resyKeys.authToken
     )
   }
 

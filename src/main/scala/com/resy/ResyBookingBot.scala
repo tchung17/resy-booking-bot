@@ -202,8 +202,31 @@ object ResyBookingBot extends Logging {
       return
     }
 
-    val resyApi             = new ResyApi(resyKeys)
-    val resyClient          = new ResyClient(resyApi)
+    val resyApi = new ResyApi(resyKeys)
+
+    val ntfyUrl =
+      sys.env.getOrElse("NTFY_URL", "https://ntfy.sh/tim-claude-alerts-1c9d3e")
+    val ntfyEnabled =
+      sys.env.get("NTFY_ENABLED").forall(v => v != "0" && v.toLowerCase != "false")
+    val ntfy = new NtfyClient(NtfyClientSettings(url = ntfyUrl, enabled = ntfyEnabled))
+    val events: ResyEventSink = new NtfyResyEventSink(ntfy, global)
+
+    val runInfo = ResyRunInfo(
+      proxy        = ResyApi.selectedProxy,
+      configPath   = options.configPath.map(_.toString).getOrElse("classpath:resyConfig.conf"),
+      date         = resDetails.date,
+      partySize    = resDetails.partySize,
+      venueId      = resDetails.venueId,
+      resTimeTypes = resDetails.resTimeTypes,
+      snipeTime    = snipeTime,
+      findOnly     = options.findOnly,
+      runNow       = options.runNow,
+      noBook       = options.noBook,
+      tokenExpiry  = ResyDiagnostics.jwtExpiry(resyKeys.authToken)
+    )
+    events.botStarted(runInfo)
+
+    val resyClient          = new ResyClient(resyApi, events = events, runInfo = Some(runInfo))
     val resyBookingWorkflow = new ResyBookingWorkflow(resyClient, resDetails)
 
     if (options.findOnly) {
