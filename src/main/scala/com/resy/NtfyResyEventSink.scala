@@ -88,7 +88,7 @@ final class NtfyResyEventSink(
       title   = "Resy find attempt",
       message = lines.mkString("\n"),
       tags    = Seq("resy", "attempt"),
-      priority = Some(2)
+      priority = Some(5)
     )
   }
 }

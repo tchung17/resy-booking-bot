@@ -18,7 +18,6 @@ object ResyBookingBot extends Logging {
   final case class CliOptions(
     configPath: Option[Path] = None,
     runNow: Boolean = false,
-    debug: Boolean = false,
     noBook: Boolean = false,
     findOnly: Boolean = false,
     validateConfig: Boolean = false,
@@ -89,10 +88,6 @@ object ResyBookingBot extends Logging {
             warnDeprecated("--now", "--run-now")
             c.copy(runNow = true)
           },
-        opt[Unit]("debug")
-          .abbr("d")
-          .action((_, c) => c.copy(debug = true))
-          .text("Enable debug logging"),
         opt[Unit]("no-book")
           .action((_, c) => c.copy(noBook = true))
           .text("Run workflow but do not book"),
@@ -151,12 +146,6 @@ object ResyBookingBot extends Logging {
     }
 
     logger.info("Starting Resy Booking Bot")
-
-    if (options.debug) {
-      System.setProperty("resy.bot.debug", "true")
-      System.setProperty("resy.bot.logLevel", "debug")
-      logger.info("Debug logging enabled")
-    }
 
     val resyConfig = configSourceFrom(options)
     val resyKeysE  = resyConfig.at("resyKeys").load[ResyKeys]

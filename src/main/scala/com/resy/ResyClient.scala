@@ -63,7 +63,7 @@ class ResyClient(
     val bookingDetailsResp = Try {
       val response = Await.result(
         awaitable = resyApi.getReservationDetails(configId, date, partySize),
-        atMost    = 10 seconds
+        atMost    = 4 seconds
       )
 
       logger.debug(s"URL Response: $response")
@@ -112,7 +112,7 @@ class ResyClient(
     val resyTokenResp = Try {
       val response = Await.result(
         awaitable = resyApi.postReservation(paymentMethodId, bookToken),
-        atMost    = 10 seconds
+        atMost    = 4 seconds
       )
 
       logger.debug(s"URL Response: $response")
@@ -143,7 +143,7 @@ class ResyClient(
   def getFindSummary(date: String, partySize: Int, venueId: Int): Try[FindSummary] = Try {
     val (status, body) = Await.result(
       awaitable = resyApi.getReservationsWithStatus(date, partySize, venueId),
-      atMost    = 10.seconds
+      atMost    = 4.seconds
     )
 
     // Resy returns JSON error bodies for auth failures; preserve a snippet for logs.
@@ -205,6 +205,8 @@ class ResyClient(
     resTimeTypes: Seq[ReservationTimeType],
     millisToRetry: Long
   ): Try[String] = {
+    val effectiveMaxInflight = math.max(1, math.min(findSettings.maxInflight, 3))
+
     if (millisToRetry <= 0L) {
       val attemptNo = 1
       return fetchReservationMapAttempt(date, partySize, venueId, attemptNo) match {
@@ -242,7 +244,29 @@ class ResyClient(
     val sawSlots = new java.util.concurrent.atomic.AtomicBoolean(false)
     val attempt  = new java.util.concurrent.atomic.AtomicInteger(0)
 
+    logger.info(
+      s"Find loop: venueId=$venueId date=$date partySize=$partySize " +
+        s"maxInflight=$effectiveMaxInflight delayMs=[${findSettings.delayMinMs},${findSettings.delayMaxMs}] " +
+        s"retryWindowMs=$millisToRetry"
+    )
+
     def timeRemainingMs: Long = stopAtMs - DateTime.now.getMillis
+
+    def logAttemptResult(attemptNo: Int, info: ResyFindAttemptInfo): Unit = {
+      val venueStr = info.venueName.map(n => s"venue=\"$n\" ").getOrElse("")
+      val suffix   = if (info.times.size > 10) ",..." else ""
+      val timesStr =
+        if (info.times.isEmpty) "(none)"
+        else info.times.take(10).mkString(",") + suffix
+
+      val base =
+        s"Find attempt=$attemptNo ${venueStr}venueId=$venueId date=$date partySize=$partySize slots=${info.slotCount} times=$timesStr"
+
+      info.error match {
+        case None    => logger.info(base)
+        case Some(e) => logger.info(s"$base error=$e")
+      }
+    }
 
     def processAttemptResult(
       attemptNo: Int,
@@ -251,22 +275,21 @@ class ResyClient(
       attemptResult match {
         case Success((reservationMap, info)) =>
           runInfo.foreach(ri => events.findAttempt(ri, info))
+          logAttemptResult(attemptNo, info)
           if (reservationMap.nonEmpty) sawSlots.set(true)
           selectConfigId(reservationMap, resTimeTypes)
         case Failure(e) =>
-          runInfo.foreach { ri =>
-            events.findAttempt(
-              ri,
-              ResyFindAttemptInfo(
-                attempt          = attemptNo,
-                venueName        = None,
-                slotCount        = 0,
-                times            = Nil,
-                timeToTableTypes = Map.empty,
-                error            = Some(e.getMessage)
-              )
+          val info =
+            ResyFindAttemptInfo(
+              attempt          = attemptNo,
+              venueName        = None,
+              slotCount        = 0,
+              times            = Nil,
+              timeToTableTypes = Map.empty,
+              error            = Some(e.getMessage)
             )
-          }
+          runInfo.foreach(ri => events.findAttempt(ri, info))
+          logAttemptResult(attemptNo, info)
           None
       }
     }
@@ -296,7 +319,7 @@ class ResyClient(
 
     // If we're effectively single-threaded, execute the first attempt inline so very small retry
     // windows still perform a real /find call before we start waiting.
-    if (findSettings.maxInflight <= 1) {
+    if (effectiveMaxInflight <= 1) {
       val firstAttemptNo = attempt.incrementAndGet()
       val firstResult    = fetchReservationMapAttempt(date, partySize, venueId, firstAttemptNo)
       processAttemptResult(firstAttemptNo, firstResult) match {
@@ -307,7 +330,7 @@ class ResyClient(
       }
     }
 
-    (1 to findSettings.maxInflight).foreach(_ => workerLoop())
+    (1 to effectiveMaxInflight).foreach(_ => workerLoop())
 
     try Success(Await.result(promise.future, millisToRetry.millis))
     catch {
@@ -337,7 +360,7 @@ class ResyClient(
   ): Try[(ReservationMap, ResyFindAttemptInfo)] = Try {
     val response = Await.result(
       awaitable = resyApi.getReservations(date, partySize, venueId),
-      atMost    = 10 seconds
+      atMost    = 4 seconds
     )
 
     logger.debug(s"URL Response: $response")

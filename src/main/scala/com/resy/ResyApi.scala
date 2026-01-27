@@ -101,7 +101,7 @@ object ResyApi extends Logging {
           url     = url,
           headers = createHeaders(resyKeys),
           body    = None,
-          timeout = 10.seconds
+          timeout = 4.seconds
         )
         .body
     }
@@ -148,7 +148,7 @@ object ResyApi extends Logging {
         url     = url,
         headers = headers,
         body    = Some(Json.stringify(bodyJson)),
-        timeout = 10.seconds
+        timeout = 4.seconds
       )
       (resp.status, resp.body, resp.headers)
     }
@@ -179,7 +179,7 @@ object ResyApi extends Logging {
           url     = url,
           headers = headers,
           body    = Some(post),
-          timeout = 10.seconds
+          timeout = 4.seconds
         )
         .body
     }
