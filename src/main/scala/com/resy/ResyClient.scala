@@ -45,7 +45,7 @@ class ResyClient(
     partySize: Int,
     venueId: Int,
     resTimeTypes: Seq[ReservationTimeType],
-    millisToRetry: Long = (10 seconds).toMillis
+    millisToRetry: Long = (20 seconds).toMillis
   ): Try[String] =
     findReservationsParallel(date, partySize, venueId, resTimeTypes, millisToRetry)
 
@@ -330,7 +330,23 @@ class ResyClient(
       }
     }
 
-    (1 to effectiveMaxInflight).foreach(_ => workerLoop())
+    def scheduleWorker(initialDelayMs: Long): Unit = {
+      if (initialDelayMs <= 0L) workerLoop()
+      else
+        ResyClient.findScheduler.schedule(
+          new Runnable {
+            override def run(): Unit = workerLoop()
+          },
+          initialDelayMs,
+          java.util.concurrent.TimeUnit.MILLISECONDS
+        )
+    }
+
+    // Stagger the initial burst so parallel workers don't all hit /find at once.
+    (1 to effectiveMaxInflight).foreach { idx =>
+      val initialDelayMs = if (idx == 1) 0L else findSettings.nextDelayMs()
+      scheduleWorker(initialDelayMs)
+    }
 
     try Success(Await.result(promise.future, millisToRetry.millis))
     catch {
