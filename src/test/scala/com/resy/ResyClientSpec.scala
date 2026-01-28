@@ -116,6 +116,51 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
     ) shouldEqual Success("CONFIG_ID2")
   }
 
+  it should "find an available reservation with wildcard time and no table type preference" in new Fixture {
+    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
+      .thenReturn(Future(Source.fromResource("getReservationsThreeTimesUnique.json").mkString))
+
+    resyClient.findReservations(
+      date      = resDetails.date,
+      partySize = resDetails.partySize,
+      venueId   = resDetails.venueId,
+      resTimeTypes = Seq(
+        ReservationTimeType("", "")
+      ),
+      millisToRetry = (.1 seconds).toMillis
+    ) shouldEqual Success("CONFIG_ID_B")
+  }
+
+  it should "find an available reservation with wildcard time and even count selects lower median" in new Fixture {
+    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
+      .thenReturn(Future(Source.fromResource("getReservationsFourTimesUnique.json").mkString))
+
+    resyClient.findReservations(
+      date      = resDetails.date,
+      partySize = resDetails.partySize,
+      venueId   = resDetails.venueId,
+      resTimeTypes = Seq(
+        ReservationTimeType("", "")
+      ),
+      millisToRetry = (.1 seconds).toMillis
+    ) shouldEqual Success("CONFIG_ID_2")
+  }
+
+  it should "find an available reservation with wildcard time and a table type preference" in new Fixture {
+    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
+      .thenReturn(Future(Source.fromResource("getReservations.json").mkString))
+
+    resyClient.findReservations(
+      date      = resDetails.date,
+      partySize = resDetails.partySize,
+      venueId   = resDetails.venueId,
+      resTimeTypes = Seq(
+        ReservationTimeType("", "TABLE_TYPE5")
+      ),
+      millisToRetry = (.1 seconds).toMillis
+    ) shouldEqual Success("CONFIG_ID5")
+  }
+
   it should "find an available reservation after a bad response with retrying" in new Fixture {
     when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
       .thenReturn(Future(""))

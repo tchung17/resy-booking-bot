@@ -41,6 +41,8 @@ allows full flexibility on your reservation preferences. For example, your prior
 
   If you have no preference on table type, then simply don't set it and the bot will pick a reservation for that time 
   slot regardless of the table type.
+  If you have no preference on time, you can set `reservation-time` to an empty string (`""`) and the bot will pick the
+  median available time (lower median when there's an even number of times), optionally filtered by `table-type` if set.
 * **hour** - Hour of the day when reservations become available and when you want to snipe
 * **minute** - Minute of the day when reservations become available and when you want to snipe
 

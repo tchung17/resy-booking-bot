@@ -358,15 +358,40 @@ class ResyClient(
   private[this] def selectConfigId(
     reservationMap: ReservationMap,
     resTimeTypes: Seq[ReservationTimeType]
-  ): Option[String] =
-    resTimeTypes.iterator.flatMap { pref =>
-      reservationMap.get(pref.reservationTime).flatMap { tableTypes =>
-        pref.tableType match {
-          case Some(tableType) if tableType.nonEmpty => tableTypes.get(tableType.toLowerCase)
-          case _                                     => tableTypes.headOption.map(_._2)
+  ): Option[String] = {
+    val availableTimesSorted = reservationMap.keys.toSeq.sorted
+
+    def selectFromTableTypes(tableTypes: TableTypeMap, pref: ReservationTimeType): Option[String] =
+      pref.tableType match {
+        case Some(tableType) if tableType.nonEmpty => tableTypes.get(tableType.toLowerCase)
+        case _                                     => tableTypes.headOption.map(_._2)
+      }
+
+    resTimeTypes.iterator
+      .flatMap { pref =>
+        if (pref.reservationTime.nonEmpty) {
+          reservationMap.get(pref.reservationTime).flatMap(tt => selectFromTableTypes(tt, pref))
+        } else {
+          val candidateTimes = availableTimesSorted.filter { time =>
+            reservationMap.get(time).exists { tableTypes =>
+              pref.tableType match {
+                case Some(tableType) if tableType.nonEmpty => tableTypes.contains(tableType.toLowerCase)
+                case _                                     => tableTypes.nonEmpty
+              }
+            }
+          }
+
+          val medianTimeOpt =
+            if (candidateTimes.isEmpty) None
+            else Some(candidateTimes((candidateTimes.size - 1) / 2))
+
+          medianTimeOpt.flatMap(time => reservationMap.get(time).flatMap(tt => selectFromTableTypes(tt, pref)))
         }
       }
-    }.take(1).toSeq.headOption
+      .take(1)
+      .toSeq
+      .headOption
+  }
 
   private[this] def fetchReservationMapAttempt(
     date: String,
