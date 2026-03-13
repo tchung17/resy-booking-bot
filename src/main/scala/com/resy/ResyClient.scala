@@ -45,7 +45,7 @@ class ResyClient(
     partySize: Int,
     venueId: Int,
     resTimeTypes: Seq[ReservationTimeType],
-    millisToRetry: Long = (20 seconds).toMillis
+    millisToRetry: Long = (15 seconds).toMillis
   ): Try[String] =
     findReservationsParallel(date, partySize, venueId, resTimeTypes, millisToRetry)
 
@@ -361,6 +361,31 @@ class ResyClient(
   ): Option[String] = {
     val availableTimesSorted = reservationMap.keys.toSeq.sorted
 
+    def timeToSeconds(time: String): Option[Int] = {
+      val parts = time.trim.split(":").toList
+      val (hStr, mStr, sStr) =
+        parts match {
+          case h :: m :: s :: Nil => (h, m, s)
+          case h :: m :: Nil      => (h, m, "0")
+          case _                  => return None
+        }
+
+      def toInt(s: String): Option[Int] =
+        try Some(s.toInt)
+        catch { case _: NumberFormatException => None }
+
+      for {
+        h <- toInt(hStr) if h >= 0 && h <= 23
+        m <- toInt(mStr) if m >= 0 && m <= 59
+        s <- toInt(sStr) if s >= 0 && s <= 59
+      } yield h * 3600 + m * 60 + s
+    }
+
+    val anchorTimeSecondsOpt =
+      resTimeTypes
+        .collectFirst { case rtt if rtt.reservationTime.trim.nonEmpty => rtt.reservationTime }
+        .flatMap(timeToSeconds)
+
     def selectFromTableTypes(tableTypes: TableTypeMap, pref: ReservationTimeType): Option[String] =
       pref.tableType match {
         case Some(tableType) if tableType.nonEmpty => tableTypes.get(tableType.toLowerCase)
@@ -369,8 +394,9 @@ class ResyClient(
 
     resTimeTypes.iterator
       .flatMap { pref =>
-        if (pref.reservationTime.nonEmpty) {
-          reservationMap.get(pref.reservationTime).flatMap(tt => selectFromTableTypes(tt, pref))
+        val prefTime = pref.reservationTime.trim
+        if (prefTime.nonEmpty) {
+          reservationMap.get(prefTime).flatMap(tt => selectFromTableTypes(tt, pref))
         } else {
           val candidateTimes = availableTimesSorted.filter { time =>
             reservationMap.get(time).exists { tableTypes =>
@@ -381,11 +407,27 @@ class ResyClient(
             }
           }
 
-          val medianTimeOpt =
+          val selectedTimeOpt =
             if (candidateTimes.isEmpty) None
-            else Some(candidateTimes((candidateTimes.size - 1) / 2))
+            else {
+              anchorTimeSecondsOpt match {
+                case None =>
+                  Some(candidateTimes((candidateTimes.size - 1) / 2))
+                case Some(anchorSeconds) =>
+                  val candidatesWithSeconds = candidateTimes.flatMap(t => timeToSeconds(t).map(sec => (t, sec)))
+                  if (candidatesWithSeconds.size != candidateTimes.size) {
+                    Some(candidateTimes((candidateTimes.size - 1) / 2))
+                  } else {
+                    val (bestTime, _) =
+                      candidatesWithSeconds.minBy { case (_, sec) =>
+                        (math.abs(sec - anchorSeconds), sec)
+                      }
+                    Some(bestTime)
+                  }
+              }
+            }
 
-          medianTimeOpt.flatMap(time => reservationMap.get(time).flatMap(tt => selectFromTableTypes(tt, pref)))
+          selectedTimeOpt.flatMap(time => reservationMap.get(time).flatMap(tt => selectFromTableTypes(tt, pref)))
         }
       }
       .take(1)

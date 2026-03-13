@@ -116,7 +116,39 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
     ) shouldEqual Success("CONFIG_ID2")
   }
 
-  it should "find an available reservation with wildcard time and no table type preference" in new Fixture {
+  it should "find an available reservation with wildcard time selecting closest to first configured time" in new Fixture {
+    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
+      .thenReturn(Future(Source.fromResource("getReservationsThreeTimesUnique.json").mkString))
+
+    resyClient.findReservations(
+      date      = resDetails.date,
+      partySize = resDetails.partySize,
+      venueId   = resDetails.venueId,
+      resTimeTypes = Seq(
+        ReservationTimeType("19:00:00"),
+        ReservationTimeType("", "")
+      ),
+      millisToRetry = (.1 seconds).toMillis
+    ) shouldEqual Success("CONFIG_ID_C")
+  }
+
+  it should "find an available reservation with wildcard time tie-breaking to earlier time" in new Fixture {
+    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
+      .thenReturn(Future(Source.fromResource("getReservationsFourTimesUnique.json").mkString))
+
+    resyClient.findReservations(
+      date      = resDetails.date,
+      partySize = resDetails.partySize,
+      venueId   = resDetails.venueId,
+      resTimeTypes = Seq(
+        ReservationTimeType("18:30:00"),
+        ReservationTimeType("", "")
+      ),
+      millisToRetry = (.1 seconds).toMillis
+    ) shouldEqual Success("CONFIG_ID_3")
+  }
+
+  it should "find an available reservation with wildcard time and no anchor falling back to median" in new Fixture {
     when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
       .thenReturn(Future(Source.fromResource("getReservationsThreeTimesUnique.json").mkString))
 
@@ -129,21 +161,6 @@ class ResyClientSpec extends AnyFlatSpec with Matchers {
       ),
       millisToRetry = (.1 seconds).toMillis
     ) shouldEqual Success("CONFIG_ID_B")
-  }
-
-  it should "find an available reservation with wildcard time and even count selects lower median" in new Fixture {
-    when(resyApi.getReservations(resDetails.date, resDetails.partySize, resDetails.venueId))
-      .thenReturn(Future(Source.fromResource("getReservationsFourTimesUnique.json").mkString))
-
-    resyClient.findReservations(
-      date      = resDetails.date,
-      partySize = resDetails.partySize,
-      venueId   = resDetails.venueId,
-      resTimeTypes = Seq(
-        ReservationTimeType("", "")
-      ),
-      millisToRetry = (.1 seconds).toMillis
-    ) shouldEqual Success("CONFIG_ID_2")
   }
 
   it should "find an available reservation with wildcard time and a table type preference" in new Fixture {

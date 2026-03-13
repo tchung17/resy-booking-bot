@@ -266,7 +266,7 @@ object ResyBookingBot extends Logging {
     }
 
     system.scheduler.scheduleOnce(millisUntilSnipe millis) {
-      if (options.noBook) resyBookingWorkflow.run(doBook = false, millisToRetry = (20 seconds).toMillis)
+      if (options.noBook) resyBookingWorkflow.run(doBook = false, millisToRetry = (15 seconds).toMillis)
       else resyBookingWorkflow.run()
 
       logger.info("Shutting down Resy Booking Bot")
