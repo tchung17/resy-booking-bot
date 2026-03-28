@@ -15,7 +15,10 @@ class ResyBookingWorkflowSpec extends AnyFlatSpec with Matchers {
   trait Fixture {
     // scalafix:off
     val resyApi: ResyApi = mock(classOf[ResyApi])
-    val resyClient       = new ResyClient(resyApi)
+    val resyClient = new ResyClient(
+      resyApi,
+      findSettings = ResyClient.FindSettings(maxInflight = 1, delayMinMs = 0L, delayMaxMs = 0L)
+    )
     // scalafix:on
   }
 
@@ -85,7 +88,7 @@ class ResyBookingWorkflowSpec extends AnyFlatSpec with Matchers {
 
     val resyBookingWorkflow = new ResyBookingWorkflow(resyClient, resDetails)
 
-    resyBookingWorkflow.run(0) match {
+    resyBookingWorkflow.run(millisToRetry = 0) match {
       case Failure(exception) =>
         exception match {
           case _: RuntimeException =>
@@ -135,7 +138,7 @@ class ResyBookingWorkflowSpec extends AnyFlatSpec with Matchers {
 
     val resyBookingWorkflow = new ResyBookingWorkflow(resyClient, newResDetails)
 
-    resyBookingWorkflow.run() match {
+    resyBookingWorkflow.run(millisToRetry = 0) match {
       case Failure(exception) =>
         exception match {
           case _: RuntimeException =>

@@ -1,0 +1,37 @@
+{
+  "results": {
+    "venues": [
+      {
+        "slots": [
+          {
+            "config": {
+              "type": "TABLE_TYPE_A",
+              "token": "CONFIG_ID_A"
+            },
+            "date": {
+              "start": "2099-01-30 16:00:00"
+            }
+          },
+          {
+            "config": {
+              "type": "TABLE_TYPE_B",
+              "token": "CONFIG_ID_B"
+            },
+            "date": {
+              "start": "2099-01-30 17:00:00"
+            }
+          },
+          {
+            "config": {
+              "type": "TABLE_TYPE_C",
+              "token": "CONFIG_ID_C"
+            },
+            "date": {
+              "start": "2099-01-30 18:00:00"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
